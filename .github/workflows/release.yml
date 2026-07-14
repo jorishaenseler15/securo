@@ -94,3 +94,32 @@ jobs:
             VITE_APP_VERSION=${{ github.event.release.tag_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  build-helm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v5
+        with:
+          version: v4.2.3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Package and Push Helm Chart
+        run: |
+          # Strip the 'v' prefix from the release tag if it exists, as helm chart version needs to be semver without v.
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+
+          echo "Packaging chart version $VERSION"
+          helm package charts/securo --version "$VERSION" --app-version "$VERSION"
+          
+          helm push securo-$VERSION.tgz oci://${{ env.REGISTRY }}/securo-finance/charts

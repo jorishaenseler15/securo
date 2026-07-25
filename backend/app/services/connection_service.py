@@ -635,7 +635,9 @@ async def handle_oauth_callback(
             # Resolve payee entity from raw payee text
             payee_id = None
             if txn_data.payee:
-                payee_entity = await get_or_create_payee(session, user_id, txn_data.payee)
+                payee_entity = await get_or_create_payee(
+                    session, user_id, txn_data.payee, workspace_id=workspace_id
+                )
                 payee_id = payee_entity.id
 
             bill = (
@@ -1014,6 +1016,7 @@ async def _sync_bill_finance_charges(
         else:
             tx = Transaction(
                 user_id=user_id,
+                workspace_id=account.workspace_id,
                 account_id=account.id,
                 external_id=external_id,
                 description=description,
@@ -1282,12 +1285,21 @@ async def sync_connection(
 
             for txn_data in transactions_data:
                 existing = await session.execute(
-                    select(Transaction).where(
+                    select(Transaction)
+                    .where(
                         Transaction.account_id == account.id,
                         Transaction.external_id == txn_data.external_id,
                     )
+                    .order_by(Transaction.created_at)
                 )
-                existing_tx = existing.scalar_one_or_none()
+                # `.first()` rather than `.scalar_one_or_none()`: a prior sync
+                # race (two overlapping passes both select-then-insert the same
+                # external_id before either commits) can leave two rows sharing
+                # (account_id, external_id). scalar_one_or_none() would raise
+                # MultipleResultsFound and abort the whole connection's sync;
+                # we instead reconcile onto the oldest matching row and skip
+                # re-inserting, so a stray duplicate is harmless and never grows.
+                existing_tx = existing.scalars().first()
                 if existing_tx:
                     # User-flagged rows are frozen: skip status/bill drift so
                     # a re-sync can't revive a transaction the user hid.
@@ -1389,7 +1401,9 @@ async def sync_connection(
                 # Resolve payee entity from raw payee text
                 sync_payee_id = None
                 if txn_data.payee:
-                    sync_payee_entity = await get_or_create_payee(session, user_id, txn_data.payee)
+                    sync_payee_entity = await get_or_create_payee(
+                        session, user_id, txn_data.payee, workspace_id=workspace_id
+                    )
                     sync_payee_id = sync_payee_entity.id
 
                 # No placeholder existed: if this charge fulfills an active bill's

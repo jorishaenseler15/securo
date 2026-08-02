@@ -96,6 +96,7 @@ jobs:
           cache-to: type=gha,mode=max
 
   build-helm:
+    needs: [build-backend, build-frontend]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -123,9 +124,12 @@ jobs:
           sed -i "s|ghcr.io/securo-finance/securo-backend:latest|ghcr.io/securo-finance/securo-backend:${VERSION}|g" charts/securo/Chart.yaml
           sed -i "s|ghcr.io/securo-finance/securo-frontend:latest|ghcr.io/securo-finance/securo-frontend:${VERSION}|g" charts/securo/Chart.yaml
 
+          echo "Injecting version $VERSION into values.yaml"
+          sed -i "s|tag: latest|tag: ${VERSION}|g" charts/securo/values.yaml
+
           echo "Packaging chart version $VERSION"
           helm package charts/securo --version "$VERSION" --app-version "$VERSION"
-          
+
           helm push securo-$VERSION.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 
       - name: Set up ORAS

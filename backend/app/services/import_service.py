@@ -620,9 +620,11 @@ async def enrich_with_category_suggestions(
     category_result = await session.execute(
         select(Category).where(Category.workspace_id == workspace_id)
     )
-    category_name_map = {str(c.id): c.name for c in category_result.scalars()}
+    categories = category_result.scalars().all()
+    category_name_map = {str(c.id): c.name for c in categories}
+    category_name_to_id = {c.name.strip().lower(): c.id for c in categories}
 
-    if not rules:
+    if not rules and not category_name_to_id:
         return transactions
 
     for txn in transactions:
@@ -637,6 +639,13 @@ async def enrich_with_category_suggestions(
             category_id=None,
         )
         category_set = False
+        
+        if txn.category_name:
+            csv_cat_id = category_name_to_id.get(txn.category_name.strip().lower())
+            if csv_cat_id:
+                proxy.category_id = csv_cat_id
+                category_set = True
+
         for rule in rules:
             conditions = rule.conditions or []
             actions = rule.actions or []

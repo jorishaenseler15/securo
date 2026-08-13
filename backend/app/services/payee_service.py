@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional, cast
 
-from sqlalchemy import CursorResult, case, select, func, update, delete
+from sqlalchemy import CursorResult, case, select, func, update, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.payee import Payee, PayeeMapping
@@ -84,7 +84,12 @@ async def get_or_create_payee(
     if len(name) > 255:
         name = name[:255]
 
-    lookup = select(Payee).where(func.lower(Payee.name) == name.lower())
+    lookup = select(Payee).where(
+        or_(
+            func.lower(Payee.name) == name.lower(),
+            Payee.name == name
+        )
+    )
     if workspace_id is not None:
         lookup = lookup.where(Payee.workspace_id == workspace_id)
     else:

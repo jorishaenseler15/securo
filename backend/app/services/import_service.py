@@ -8,7 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from ofxparse import OfxParser
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -411,7 +411,8 @@ def parse_csv(
     inflow_column: str | None = None,
     outflow_column: str | None = None,
     column_mapping: dict[str, str] | None = None,
-) -> list[TransactionImport]:
+    return_failed_rows: bool = False,
+) -> list[TransactionImport] | tuple[list[TransactionImport], list[dict]]:
     """Parse CSV file content and return transactions.
 
     Attempts to detect common column formats:
@@ -515,6 +516,7 @@ def parse_csv(
         date_formats = ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%m/%d/%Y', '%d.%m.%Y']
 
     transactions = []
+    failed_rows = []
     for row in reader:
         # Normalize row keys
         row = {k.lower().strip() if k is not None else "": v for k, v in row.items()}
@@ -530,6 +532,12 @@ def parse_csv(
                 continue
 
         if not txn_date:
+            failed_rows.append({
+                "line_number": reader.line_num,
+                "description": row.get(desc_col, "").strip(),
+                "raw_value": date_str,
+                "error_reason": "Invalid Date Format",
+            })
             continue  # Skip invalid dates
 
         # Parse amount
@@ -553,6 +561,13 @@ def parse_csv(
                 amount = outflow
                 txn_type = "debit"
             else:
+                raw_val = f"inflow: {row.get(inflow_col, '')}, outflow: {row.get(outflow_col, '')}"
+                failed_rows.append({
+                    "line_number": reader.line_num,
+                    "description": row.get(desc_col, "").strip(),
+                    "raw_value": raw_val,
+                    "error_reason": "No Inflow or Outflow Amount",
+                })
                 continue  # Skip rows with no amount
         else:
             amount_str = normalize_amount(row[amount_col])
@@ -560,6 +575,12 @@ def parse_csv(
             try:
                 amount = Decimal(amount_str)
             except Exception:
+                failed_rows.append({
+                    "line_number": reader.line_num,
+                    "description": row.get(desc_col, "").strip(),
+                    "raw_value": row[amount_col],
+                    "error_reason": "Invalid Amount Format",
+                })
                 continue  # Skip invalid amounts
 
             if flip_amount:
@@ -602,6 +623,8 @@ def parse_csv(
             notes=txn_notes,
         ))
 
+    if return_failed_rows:
+        return transactions, failed_rows
     return transactions
 
 
@@ -715,6 +738,9 @@ async def import_transactions(
     effective_format = (detected_format or source or "").lower()
     should_detect_duplicates = detect_duplicates if effective_format == "csv" else True
 
+    db_counts = {}
+    matched_counts = {}
+
     for txn_data in included:
         # Resolve currency: CSV value > account currency
         txn_currency = txn_data.currency or account_currency
@@ -722,34 +748,33 @@ async def import_transactions(
         if should_detect_duplicates:
             # Duplicate detection: use external_id when available (OFX FITID),
             # fall back to field-based matching for formats without unique IDs.
-            # When matching by external_id, also require the same `date` so that
-            # Brazilian credit-card installments — where some banks reuse one
-            # purchase FITID across every monthly statement — don't get skipped
-            # as duplicates from later monthly imports (issue #98).
+            # We track identical transaction frequencies to allow multi-item
+            # identical charges on the same day to import fully.
             if txn_data.external_id:
-                existing = await session.execute(
-                    select(Transaction).where(
+                key = ("ext", txn_data.external_id, txn_data.date)
+            else:
+                key = ("fields", txn_data.date, txn_data.amount, txn_data.type, txn_data.description)
+
+            if key not in db_counts:
+                if txn_data.external_id:
+                    count_stmt = select(func.count()).select_from(Transaction).where(
                         Transaction.account_id == account_id,
                         Transaction.external_id == txn_data.external_id,
                         Transaction.date == txn_data.date,
                     )
-                )
-            else:
-                existing = await session.execute(
-                    select(Transaction).where(
+                else:
+                    count_stmt = select(func.count()).select_from(Transaction).where(
                         Transaction.account_id == account_id,
                         Transaction.date == txn_data.date,
                         Transaction.amount == txn_data.amount,
                         Transaction.type == txn_data.type,
                         Transaction.description == txn_data.description,
                     )
-                )
-            # `.first()` rather than `.scalar_one_or_none()`: the dedup key can
-            # legitimately match more than one row (e.g. a prior sync/import race
-            # left a duplicate, or a bank reuses one FITID across statements),
-            # and we only need to know whether *any* match exists. Requiring
-            # exactly one would raise MultipleResultsFound and abort the import.
-            if existing.scalars().first() is not None:
+                db_counts[key] = await session.scalar(count_stmt) or 0
+                matched_counts[key] = 0
+
+            if matched_counts[key] < db_counts[key]:
+                matched_counts[key] += 1
                 skipped += 1
                 continue
 
@@ -847,7 +872,8 @@ def normalize_amount(amount_str: str | None) -> str:
     if not amount_str:
         return ""
 
-    amount_str = str(amount_str).replace('R$', '').strip()
+    # Strip currency prefix and Swiss thousands separators (single quote)
+    amount_str = str(amount_str).replace('R$', '').replace("'", "").strip()
 
     if ',' in amount_str and '.' in amount_str:
         if amount_str.rfind(',') > amount_str.rfind('.'):

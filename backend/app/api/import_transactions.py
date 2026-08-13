@@ -55,6 +55,7 @@ async def preview_import(
             )
 
     parse_error: Optional[str] = None
+    failed_rows = []
     try:
         if filename.lower().endswith('.ofx') or filename.lower().endswith('.qfx'):
             transactions = import_service.parse_ofx(content)
@@ -68,13 +69,14 @@ async def preview_import(
         elif filename.lower().endswith('.csv'):
             detected_format = "csv"
             try:
-                transactions = import_service.parse_csv(
+                transactions, failed_rows = import_service.parse_csv(
                     content,
                     date_format=date_format,
                     flip_amount=flip_amount,
                     inflow_column=inflow_column,
                     outflow_column=outflow_column,
                     column_mapping=parsed_mapping,
+                    return_failed_rows=True,
                 )
             except ValueError as csv_err:
                 # The CSV's columns couldn't be auto-mapped. As long as we can
@@ -98,7 +100,7 @@ async def preview_import(
                         transactions = import_service.parse_camt(content)
                         detected_format = "camt"
                     except Exception:
-                        transactions = import_service.parse_csv(content)
+                        transactions, failed_rows = import_service.parse_csv(content, return_failed_rows=True)
                         detected_format = "csv"
     except Exception as e:
         logger.error(
@@ -135,6 +137,7 @@ async def preview_import(
         detected_format=detected_format,
         csv_columns=csv_columns,
         parse_error=parse_error,
+        failed_rows=failed_rows,
     )
 
 

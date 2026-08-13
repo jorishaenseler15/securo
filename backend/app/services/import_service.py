@@ -6,6 +6,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from ofxparse import OfxParser
 from sqlalchemy import select, func
@@ -412,7 +413,7 @@ def parse_csv(
     outflow_column: str | None = None,
     column_mapping: dict[str, str] | None = None,
     return_failed_rows: bool = False,
-) -> list[TransactionImport] | tuple[list[TransactionImport], list[dict]]:
+) -> Any:
     """Parse CSV file content and return transactions.
 
     Attempts to detect common column formats:

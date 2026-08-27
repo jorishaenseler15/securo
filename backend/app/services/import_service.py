@@ -532,12 +532,7 @@ def parse_csv(
                 continue
 
         if not txn_date:
-            failed_rows.append(FailedRow(**{
-                "line_number": reader.line_num,
-                "description": row.get(desc_col, "").strip(),
-                "raw_value": date_str,
-                "error_reason": "invalid_date",
-            }))
+            failed_rows.append(FailedRow(line_number=reader.line_num, description=row.get(desc_col, "").strip(), raw_value=date_str, error_reason="invalid_date"))
             continue  # Skip invalid dates
 
         # Parse amount
@@ -562,12 +557,7 @@ def parse_csv(
                 txn_type = "debit"
             else:
                 raw_val = f"inflow: {row.get(inflow_col, '')}, outflow: {row.get(outflow_col, '')}"
-                failed_rows.append(FailedRow(**{
-                    "line_number": reader.line_num,
-                    "description": row.get(desc_col, "").strip(),
-                    "raw_value": raw_val,
-                    "error_reason": "no_amount",
-                }))
+                failed_rows.append(FailedRow(line_number=reader.line_num, description=row.get(desc_col, "").strip(), raw_value=raw_val, error_reason="no_amount"))
                 continue  # Skip rows with no amount
         else:
             amount_str = normalize_amount(row[amount_col])
@@ -575,12 +565,7 @@ def parse_csv(
             try:
                 amount = Decimal(amount_str)
             except Exception:
-                failed_rows.append(FailedRow(**{
-                    "line_number": reader.line_num,
-                    "description": row.get(desc_col, "").strip(),
-                    "raw_value": row[amount_col],
-                    "error_reason": "invalid_amount",
-                }))
+                failed_rows.append(FailedRow(line_number=reader.line_num, description=row.get(desc_col, "").strip(), raw_value=row[amount_col], error_reason="invalid_amount"))
                 continue  # Skip invalid amounts
 
             if flip_amount:

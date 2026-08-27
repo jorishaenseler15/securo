@@ -107,7 +107,7 @@ async def preview_import(
                         transactions = import_service.parse_camt(content)
                         detected_format = "camt"
                     except Exception:
-                        transactions, failed_rows = import_service.parse_csv(content, return_failed_rows=True)
+                        transactions, failed_rows = import_service.parse_csv(content)
                         detected_format = "csv"
     except Exception as e:
         logger.error(

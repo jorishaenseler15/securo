@@ -84,7 +84,6 @@ async def preview_import(
                     inflow_column=inflow_column,
                     outflow_column=outflow_column,
                     column_mapping=parsed_mapping,
-                    return_failed_rows=True,
                 )
             except ValueError as csv_err:
                 # The CSV's columns couldn't be auto-mapped. As long as we can

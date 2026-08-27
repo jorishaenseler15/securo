@@ -412,8 +412,7 @@ def parse_csv(
     inflow_column: str | None = None,
     outflow_column: str | None = None,
     column_mapping: dict[str, str] | None = None,
-    return_failed_rows: bool = False,
-) -> list[TransactionImport] | tuple[list[TransactionImport], list[dict]]:
+    ) -> tuple[list[TransactionImport], list[dict[str, Any]]]:
     """Parse CSV file content and return transactions.
 
     Attempts to detect common column formats:
@@ -624,9 +623,7 @@ def parse_csv(
             notes=txn_notes,
         ))
 
-    if return_failed_rows:
-        return transactions, failed_rows
-    return transactions
+    return transactions, failed_rows
 
 
 async def enrich_with_category_suggestions(

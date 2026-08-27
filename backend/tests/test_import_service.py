@@ -2453,9 +2453,9 @@ def test_parse_csv_returns_failed_rows():
     transactions, failed_rows = parse_csv(csv_content.encode("utf-8"))
     assert len(transactions) == 1
     assert len(failed_rows) == 2
-    assert failed_rows[0]["line_number"] == 3
-    assert failed_rows[0]["error_reason"] == "invalid_date"
-    assert failed_rows[0]["raw_value"] == "invalid_date"
-    assert failed_rows[1]["line_number"] == 4
-    assert failed_rows[1]["error_reason"] == "invalid_amount"
-    assert failed_rows[1]["raw_value"] == "invalid_val"
+    assert failed_rows[0].line_number == 3
+    assert failed_rows[0].error_reason == "invalid_date"
+    assert failed_rows[0].raw_value == "invalid_date"
+    assert failed_rows[1].line_number == 4
+    assert failed_rows[1].error_reason == "invalid_amount"
+    assert failed_rows[1].raw_value == "invalid_val"

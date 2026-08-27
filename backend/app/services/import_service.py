@@ -17,7 +17,7 @@ from app.models.account import Account
 from app.models.category import Category
 from app.models.rule import Rule
 from app.models.transaction import Transaction
-from app.schemas.transaction import TransactionImport
+from app.schemas.transaction import TransactionImport, FailedRow
 from app.services import recurring_match_service
 from app.services.credit_card_service import apply_effective_date
 from app.services.category_service import get_hidden_category_ids
@@ -413,7 +413,7 @@ def parse_csv(
     inflow_column: str | None = None,
     outflow_column: str | None = None,
     column_mapping: dict[str, str] | None = None,
-    ) -> tuple[list[TransactionImport], list[dict[str, Any]]]:
+    ) -> tuple[list[TransactionImport], list[FailedRow]]:
     """Parse CSV file content and return transactions.
 
     Attempts to detect common column formats:
@@ -533,12 +533,12 @@ def parse_csv(
                 continue
 
         if not txn_date:
-            failed_rows.append({
+            failed_rows.append(FailedRow(**{
                 "line_number": reader.line_num,
                 "description": row.get(desc_col, "").strip(),
                 "raw_value": date_str,
                 "error_reason": "invalid_date",
-            })
+            }))
             continue  # Skip invalid dates
 
         # Parse amount
@@ -563,12 +563,12 @@ def parse_csv(
                 txn_type = "debit"
             else:
                 raw_val = f"inflow: {row.get(inflow_col, '')}, outflow: {row.get(outflow_col, '')}"
-                failed_rows.append({
+                failed_rows.append(FailedRow(**{
                     "line_number": reader.line_num,
                     "description": row.get(desc_col, "").strip(),
                     "raw_value": raw_val,
                     "error_reason": "no_amount",
-                })
+                }))
                 continue  # Skip rows with no amount
         else:
             amount_str = normalize_amount(row[amount_col])
@@ -576,12 +576,12 @@ def parse_csv(
             try:
                 amount = Decimal(amount_str)
             except Exception:
-                failed_rows.append({
+                failed_rows.append(FailedRow(**{
                     "line_number": reader.line_num,
                     "description": row.get(desc_col, "").strip(),
                     "raw_value": row[amount_col],
                     "error_reason": "invalid_amount",
-                })
+                }))
                 continue  # Skip invalid amounts
 
             if flip_amount:

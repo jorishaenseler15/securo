@@ -6,6 +6,7 @@ import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
 from ofxparse import OfxParser
 from sqlalchemy import or_, select

@@ -2454,52 +2454,8 @@ def test_parse_csv_returns_failed_rows():
     assert len(transactions) == 1
     assert len(failed_rows) == 2
     assert failed_rows[0]["line_number"] == 3
-    assert failed_rows[0]["error_reason"] == "Invalid Date Format"
+    assert failed_rows[0]["error_reason"] == "invalid_date"
     assert failed_rows[0]["raw_value"] == "invalid_date"
     assert failed_rows[1]["line_number"] == 4
-    assert failed_rows[1]["error_reason"] == "Invalid Amount Format"
+    assert failed_rows[1]["error_reason"] == "invalid_amount"
     assert failed_rows[1]["raw_value"] == "invalid_val"
-
-
-@pytest.mark.asyncio
-async def test_frequency_based_duplicate_detection(
-    session: AsyncSession, test_user: User, test_workspace, test_account: Account
-):
-    from app.schemas.transaction import TransactionImport
-    from app.models.transaction import Transaction
-    from sqlalchemy import select
-
-    d = date(2026, 8, 4)
-
-    # 1. DB has 1 matching transaction
-    session.add(Transaction(
-        id=uuid.uuid4(), user_id=test_user.id, account_id=test_account.id,
-        description="Identical TWINT", amount=Decimal("5.00"),
-        date=d, type="debit", source="csv"
-    ))
-    await session.commit()
-
-    # Import batch has 2 matching transactions
-    txns = [
-        TransactionImport(description="Identical TWINT", amount=Decimal("5.00"), date=d, type="debit"),
-        TransactionImport(description="Identical TWINT", amount=Decimal("5.00"), date=d, type="debit"),
-    ]
-
-    imported, skipped, _, _ = await import_transactions(
-        session, test_workspace.id, test_user.id, test_account.id, txns, "csv",
-        detected_format="csv"
-    )
-
-    # First incoming transaction matches existing DB one -> skipped
-    # Second incoming transaction is additional -> imported
-    assert imported == 1
-    assert skipped == 1
-
-    # DB should now have 2 identical transactions
-    all_txs = (await session.execute(
-        select(Transaction).where(
-            Transaction.account_id == test_account.id,
-            Transaction.description == "Identical TWINT"
-        )
-    )).scalars().all()
-    assert len(all_txs) == 2

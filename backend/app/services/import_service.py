@@ -20,6 +20,7 @@ from app.models.transaction import Transaction
 from app.schemas.transaction import TransactionImport
 from app.services import recurring_match_service
 from app.services.credit_card_service import apply_effective_date
+from app.services.category_service import get_hidden_category_ids
 from app.services.rule_engine import apply_rule_actions, evaluate_conditions, merge_notes
 from app.services.rule_service import apply_rules_to_transaction, preview_rules_for_transaction
 from app.services.fx_rate_service import stamp_primary_amount
@@ -413,7 +414,7 @@ def parse_csv(
     outflow_column: str | None = None,
     column_mapping: dict[str, str] | None = None,
     return_failed_rows: bool = False,
-) -> Any:
+) -> list[TransactionImport] | tuple[list[TransactionImport], list[dict]]:
     """Parse CSV file content and return transactions.
 
     Attempts to detect common column formats:
@@ -537,7 +538,7 @@ def parse_csv(
                 "line_number": reader.line_num,
                 "description": row.get(desc_col, "").strip(),
                 "raw_value": date_str,
-                "error_reason": "Invalid Date Format",
+                "error_reason": "invalid_date",
             })
             continue  # Skip invalid dates
 
@@ -567,7 +568,7 @@ def parse_csv(
                     "line_number": reader.line_num,
                     "description": row.get(desc_col, "").strip(),
                     "raw_value": raw_val,
-                    "error_reason": "No Inflow or Outflow Amount",
+                    "error_reason": "no_amount",
                 })
                 continue  # Skip rows with no amount
         else:
@@ -580,7 +581,7 @@ def parse_csv(
                     "line_number": reader.line_num,
                     "description": row.get(desc_col, "").strip(),
                     "raw_value": row[amount_col],
-                    "error_reason": "Invalid Amount Format",
+                    "error_reason": "invalid_amount",
                 })
                 continue  # Skip invalid amounts
 
@@ -645,8 +646,13 @@ async def enrich_with_category_suggestions(
         select(Category).where(Category.workspace_id == workspace_id)
     )
     categories = category_result.scalars().all()
+    hidden_categories = await get_hidden_category_ids(session, workspace_id)
     category_name_map = {str(c.id): c.name for c in categories}
-    category_name_to_id = {c.name.strip().lower(): c.id for c in categories}
+    category_name_to_id = {
+        c.name.strip().lower(): c.id 
+        for c in categories 
+        if c.id not in hidden_categories
+    }
 
     if not rules and not category_name_to_id:
         return transactions
@@ -664,17 +670,23 @@ async def enrich_with_category_suggestions(
         )
         category_set = False
         
-        if txn.category_name:
-            csv_cat_id = category_name_to_id.get(txn.category_name.strip().lower())
-            if csv_cat_id:
-                proxy.category_id = csv_cat_id
-                category_set = True
-
         for rule in rules:
             conditions = rule.conditions or []
             actions = rule.actions or []
             if evaluate_conditions(rule.conditions_op, conditions, proxy):
-                category_set = apply_rule_actions(actions, proxy, category_set)
+                category_set = apply_rule_actions(
+                    actions,
+                    proxy,
+                    category_set,
+                    hidden_category_ids=hidden_categories,
+                )
+        
+        # If rules did not set a category, apply the CSV category if found
+        if not category_set and txn.category_name:
+            csv_cat_id = category_name_to_id.get(txn.category_name.strip().lower())
+            if csv_cat_id:
+                proxy.category_id = csv_cat_id
+                category_set = True
         if proxy.category_id:
             txn.suggested_category_id = proxy.category_id
             txn.suggested_category_name = category_name_map.get(str(proxy.category_id))
@@ -739,35 +751,26 @@ async def import_transactions(
     effective_format = (detected_format or source or "").lower()
     should_detect_duplicates = detect_duplicates if effective_format == "csv" else True
 
-    db_counts = {}
-    matched_counts = {}
-
     for txn_data in included:
         # Resolve currency: CSV value > account currency
         txn_currency = txn_data.currency or account_currency
 
         if should_detect_duplicates:
-            # Duplicate detection: prefer an external ID (OFX FITID, with date
-            # retained because some Brazilian cards reuse one purchase FITID across
-            # monthly installments), and fall back to field-based matching for
-            # formats without unique IDs (comparing both descriptions in case rules
-            # modified the displayed description).
-            # We track identical transaction frequencies to allow multi-item
-            # identical charges on the same day to import fully.
+            # Prefer an external ID (OFX FITID), with date retained because some
+            # Brazilian cards reuse one purchase FITID across monthly installments.
+            # Formats without unique IDs fall back to transaction fields; compare
+            # both descriptions because rules may have changed the displayed one.
             if txn_data.external_id:
-                key = ("ext", txn_data.external_id, txn_data.date)
-            else:
-                key = ("fields", txn_data.date, txn_data.amount, txn_data.type, txn_data.description)
-
-            if key not in db_counts:
-                if txn_data.external_id:
-                    count_stmt = select(func.count()).select_from(Transaction).where(
+                existing = await session.execute(
+                    select(Transaction).where(
                         Transaction.account_id == account_id,
                         Transaction.external_id == txn_data.external_id,
                         Transaction.date == txn_data.date,
                     )
-                else:
-                    count_stmt = select(func.count()).select_from(Transaction).where(
+                )
+            else:
+                existing = await session.execute(
+                    select(Transaction).where(
                         Transaction.account_id == account_id,
                         Transaction.date == txn_data.date,
                         Transaction.amount == txn_data.amount,
@@ -777,11 +780,11 @@ async def import_transactions(
                             Transaction.original_description == txn_data.description,
                         ),
                     )
-                db_counts[key] = await session.scalar(count_stmt) or 0
-                matched_counts[key] = 0
-
-            if matched_counts[key] < db_counts[key]:
-                matched_counts[key] += 1
+                )
+            # `.first()` is intentional: duplicate keys can legitimately match
+            # multiple rows after an import/sync race or reused bank identifier,
+            # and duplicate detection only needs to establish that any row exists.
+            if existing.scalars().first() is not None:
                 skipped += 1
                 continue
 

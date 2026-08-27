@@ -3,7 +3,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Optional, cast
 
-from sqlalchemy import CursorResult, case, select, func, update, delete, or_
+from sqlalchemy import CursorResult, case, select, func, update, delete
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.payee import Payee, PayeeMapping, PayeeTaxId
@@ -70,14 +71,10 @@ async def get_or_create_payee(
     user_id: uuid.UUID,
     name: str,
     *,
-    workspace_id: Optional[uuid.UUID] = None,
+    workspace_id: uuid.UUID,
     source: str = "sync",
 ) -> Payee:
-    """Find a payee by name (case-insensitive) or create a new one.
-
-    `user_id` is kept first for backwards compatibility with import/connection
-    sync paths. When `workspace_id` is provided, the lookup scopes by workspace;
-    otherwise the autostamp listener fills it in on insert.
+    """Find a normalized workspace payee or create it.
 
     `source` is stamped only on rows this call creates. An existing payee is
     returned untouched, so a counterparty somebody entered by hand keeps
@@ -94,28 +91,36 @@ async def get_or_create_payee(
 
     if len(name) > 255:
         name = name[:255]
-
+    # Mirrors the uq_payees_workspace_id_lower_name index exactly, so the
+    # lookup hits the same row the unique constraint would reject.
     lookup = select(Payee).where(
-        or_(
-            func.lower(Payee.name) == name.lower(),
-            Payee.name == name
-        )
+        Payee.workspace_id == workspace_id,
+        func.lower(func.trim(Payee.name)) == name.lower(),
     )
-    if workspace_id is not None:
-        lookup = lookup.where(Payee.workspace_id == workspace_id)
-    else:
-        lookup = lookup.where(Payee.user_id == user_id)
     result = await session.execute(lookup)
     payee = result.scalar_one_or_none()
     if payee:
         return payee
 
-    payee = Payee(user_id=user_id, name=name, source=source)
-    if workspace_id is not None:
-        payee.workspace_id = workspace_id
-    session.add(payee)
-    await session.flush()
-    return payee
+    payee = Payee(
+        user_id=user_id,
+        workspace_id=workspace_id,
+        name=name,
+        source=source,
+    )
+    try:
+        async with session.begin_nested():
+            session.add(payee)
+            await session.flush()
+        return payee
+    except IntegrityError:
+        # Another sync/import created it after our lookup. The savepoint keeps
+        # the caller's transaction usable; return the winner instead.
+        result = await session.execute(lookup)
+        existing = result.scalar_one_or_none()
+        if existing:
+            return existing
+        raise
 
 
 async def _apply_tax_ids(
@@ -182,14 +187,22 @@ async def create_payee(
     user_id: uuid.UUID,
     data: PayeeCreate,
 ) -> Payee:
+    name = data.name.strip()
+    if not name:
+        raise ValueError("Payee name cannot be empty")
+
     # Check uniqueness
     existing = await session.execute(
-        select(Payee).where(Payee.workspace_id == workspace_id, func.lower(Payee.name) == data.name.strip().lower())
+        select(Payee).where(
+            Payee.workspace_id == workspace_id,
+            func.lower(func.trim(Payee.name)) == name.lower(),
+        )
     )
     if existing.scalar_one_or_none():
         raise ValueError("A payee with this name already exists")
 
     fields = data.model_dump(exclude={"tax_ids"})
+    fields["name"] = name
     # Stamped here rather than taken from the request: this is the path a
     # person went through a form to reach.
     payee = Payee(user_id=user_id, workspace_id=workspace_id, source="manual", **fields)
@@ -220,11 +233,15 @@ async def update_payee(
     tax_ids = update_data.pop("tax_ids", None)
 
     # Check name uniqueness if name is being changed
-    if "name" in update_data and update_data["name"]:
+    if "name" in update_data:
+        name = (update_data["name"] or "").strip()
+        if not name:
+            raise ValueError("Payee name cannot be empty")
+        update_data["name"] = name
         existing = await session.execute(
             select(Payee).where(
                 Payee.workspace_id == workspace_id,
-                func.lower(Payee.name) == update_data["name"].strip().lower(),
+                func.lower(func.trim(Payee.name)) == name.lower(),
                 Payee.id != payee_id,
             )
         )

@@ -610,7 +610,7 @@ function TransactionImportPanel() {
                     <td className="px-3 py-2 text-muted-foreground">{row.line_number}</td>
                     <td className="px-3 py-2 truncate max-w-[200px]" title={row.description}>{row.description || '-'}</td>
                     <td className="px-3 py-2 font-mono break-all max-w-[150px]">{row.raw_value}</td>
-                    <td className="px-3 py-2 text-amber-600 font-medium">{row.error_reason}</td>
+                    <td className="px-3 py-2 text-amber-600 font-medium">{t(`import.errors.${row.error_reason}`)}</td>
                   </tr>
                 ))}
               </tbody>

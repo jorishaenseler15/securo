@@ -518,8 +518,16 @@ def parse_csv(
     transactions = []
     failed_rows = []
     for row in reader:
-        # Normalize row keys
-        row = {k.lower().strip() if k is not None else "": v for k, v in row.items()}
+        # Normalize row keys, and missing cells along with them. A row with
+        # fewer cells than the header leaves the rest as None, which every
+        # .strip() below raises on and which FailedRow.raw_value rejects. That
+        # turned a single short row into a 400 for the whole file, which is
+        # exactly the case this parser is meant to report row by row. An
+        # absent cell reads as an empty one.
+        row = {
+            k.lower().strip() if k is not None else "": ("" if v is None else v)
+            for k, v in row.items()
+        }
 
         # Parse date
         date_str = row[date_col].strip()
@@ -721,11 +729,20 @@ async def import_transactions(
     account = account_result.scalar_one_or_none()
     account_currency = account.currency if account else get_settings().default_currency
 
-    # Build category name → id map scoped to the workspace.
+    # Build category name → id map scoped to the workspace, on the same terms
+    # the preview used: hidden categories excluded, names matched
+    # case-insensitively. Diverging here meant a CSV category the preview
+    # deliberately withheld was still persisted on the imported row, and that
+    # "Food" matched in the preview but not on import.
     category_result = await session.execute(
         select(Category).where(Category.workspace_id == workspace_id)
     )
-    category_map = {c.name: c.id for c in category_result.scalars()}
+    hidden_categories = await get_hidden_category_ids(session, workspace_id)
+    category_map = {
+        c.name.strip().lower(): c.id
+        for c in category_result.scalars()
+        if c.id not in hidden_categories
+    }
 
     imported = 0
     skipped = 0
@@ -781,7 +798,7 @@ async def import_transactions(
         user_category_id = txn_data.category_id
         suggested_cat_id = txn_data.suggested_category_id
         csv_category_id = (
-            category_map.get(txn_data.category_name)
+            category_map.get(txn_data.category_name.strip().lower())
             if txn_data.category_name
             else None
         )

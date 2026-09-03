@@ -1755,6 +1755,84 @@ class TestImportTransactionsWithCategory:
 
     @pytest.mark.asyncio
     @patch("app.services.fx_rate_service._provider")
+    async def test_hidden_category_name_leaves_uncategorized(
+        self, mock_provider, session: AsyncSession, test_user: User, test_workspace, test_account: Account,
+    ):
+        """A hidden category is withheld on import, as it is in the preview.
+
+        The preview filters hidden categories out of its suggestion map. The
+        final import used to build its own unfiltered map, so a CSV naming a
+        hidden category still got it persisted, and the imported row disagreed
+        with what the preview showed.
+        """
+        from app.models.category import Category
+        from app.models.transaction import Transaction
+        from app.schemas.transaction import TransactionImport
+        from sqlalchemy import select
+
+        hidden = Category(
+            id=uuid.uuid4(), user_id=test_user.id, workspace_id=test_workspace.id,
+            name="Categoria Oculta", icon="eye-off", color="#64748B", is_hidden=True,
+        )
+        session.add(hidden)
+        await session.commit()
+
+        txns = [TransactionImport(
+            description="Hidden Cat Transaction",
+            amount=Decimal("42.00"),
+            date=date(2026, 1, 11),
+            type="debit",
+            category_name="Categoria Oculta",
+        )]
+
+        imported, _, _, _ = await import_transactions(
+            session, test_workspace.id, test_user.id, test_account.id, txns, "import",
+        )
+
+        assert imported == 1
+        tx = (await session.execute(
+            select(Transaction).where(Transaction.description == "Hidden Cat Transaction")
+        )).scalar_one()
+        assert tx.category_id is None
+
+    @pytest.mark.asyncio
+    @patch("app.services.fx_rate_service._provider")
+    async def test_category_name_matches_case_insensitively(
+        self, mock_provider, session: AsyncSession, test_user: User, test_workspace, test_account: Account,
+    ):
+        """Import matches category names the way the preview does."""
+        from app.models.category import Category
+        from app.models.transaction import Transaction
+        from app.schemas.transaction import TransactionImport
+        from sqlalchemy import select
+
+        category = Category(
+            id=uuid.uuid4(), user_id=test_user.id, workspace_id=test_workspace.id,
+            name="Alimentação", icon="utensils", color="#F97316",
+        )
+        session.add(category)
+        await session.commit()
+
+        txns = [TransactionImport(
+            description="Case Insensitive Cat",
+            amount=Decimal("18.00"),
+            date=date(2026, 1, 12),
+            type="debit",
+            category_name="  alimentação  ",
+        )]
+
+        imported, _, _, _ = await import_transactions(
+            session, test_workspace.id, test_user.id, test_account.id, txns, "import",
+        )
+
+        assert imported == 1
+        tx = (await session.execute(
+            select(Transaction).where(Transaction.description == "Case Insensitive Cat")
+        )).scalar_one()
+        assert tx.category_id == category.id
+
+    @pytest.mark.asyncio
+    @patch("app.services.fx_rate_service._provider")
     async def test_no_category_name_leaves_uncategorized(
         self, mock_provider, session: AsyncSession, test_user: User, test_workspace, test_account: Account,
     ):
@@ -2456,6 +2534,38 @@ def test_parse_csv_returns_failed_rows():
     assert failed_rows[0].line_number == 3
     assert failed_rows[0].error_reason == "invalid_date"
     assert failed_rows[0].raw_value == "invalid_date"
+    assert failed_rows[0].description == "Invalid Date"
     assert failed_rows[1].line_number == 4
     assert failed_rows[1].error_reason == "invalid_amount"
     assert failed_rows[1].raw_value == "invalid_val"
+    assert failed_rows[1].description == "Invalid Amount"
+
+
+def test_parse_csv_reports_short_rows_instead_of_raising():
+    """A row with fewer cells than the header is reported, not fatal.
+
+    csv.DictReader leaves the missing cells as None, so every .strip() on them
+    used to raise and the API turned that into a 400 for the whole file. One
+    malformed row is exactly what failed_rows exists to describe.
+    """
+    from app.services.import_service import parse_csv
+    csv_content = (
+        "date,description,amount\n"
+        "2026-08-01,Valid,-10.00\n"
+        "2026-08-02,Missing amount\n"
+        "2026-08-03\n"
+        "invalid_date\n"
+    )
+    transactions, failed_rows = parse_csv(csv_content.encode("utf-8"))
+
+    assert len(transactions) == 1
+    assert len(failed_rows) == 3
+    assert failed_rows[0].line_number == 3
+    assert failed_rows[0].description == "Missing amount"
+    assert failed_rows[0].error_reason == "invalid_amount"
+    # A cell the row never had reads as empty, never as None.
+    assert failed_rows[1].line_number == 4
+    assert failed_rows[1].description == ""
+    assert failed_rows[2].line_number == 5
+    assert failed_rows[2].error_reason == "invalid_date"
+    assert failed_rows[2].raw_value == "invalid_date"
